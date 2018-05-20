@@ -1,0 +1,3 @@
+#!/bin/bash
+insmod pnlfs.ko
+mount -t pnlfs -o loop ./pnl-disk.img /mnt
