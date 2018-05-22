@@ -10,6 +10,7 @@
 #define PNLFS_MAX_FILESIZE     (1 << 22)  /* 4 MiB */
 #define PNLFS_FILENAME_LEN            28
 #define PNLFS_MAX_DIR_ENTRIES        128
+#define PNLFS_MAX_BLOCKS_PER_FILE    1024
 
 
 /*

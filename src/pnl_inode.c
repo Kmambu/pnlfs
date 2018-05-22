@@ -22,6 +22,7 @@ struct file_operations pnl_ifops = {
 	.owner = THIS_MODULE,
 	.iterate_shared = pnl_readdir,
 	.read = pnl_read,
+	.write = pnl_write,
 };
 
 struct inode *pnl_alloc_inode(struct super_block *sb)

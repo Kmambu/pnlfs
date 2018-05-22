@@ -163,6 +163,7 @@ int pnl_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 	{
 		pr_warn("[pnlfs] --- create ---\n");
 		pr_warn("[pnlfs] File exists\n");
+		brelse(bh);
 		iput(inode);
 		return -EEXIST;
 	}
@@ -171,6 +172,7 @@ int pnl_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 	{
 		pr_warn("[pnlfs] --- create ---\n");
 		pr_warn("[pnlfs] Exceeded max enteies in directory\n");
+		brelse(bh);
 		iput(inode);
 		return -ENOSPC;
 	}
@@ -217,9 +219,10 @@ int pnl_unlink(struct inode *dir, struct dentry *dentry)
 	dir_info = container_of(dir, struct pnlfs_inode_info, vfs_inode);
 	dir_index = dir_info->index_block;
 	bh = sb_bread(sb, dir_index);
-	if (!sb) {
+	if (!bh) {
 		pr_warn("[pnlfs] --- unlink ---\n");
 		pr_warn("[pnlfs] sb_read() failed\n");
+		brelse(bh);
 		return -EIO;
 	}
 	dir_block = (struct pnlfs_dir_block *) bh->b_data;
@@ -287,6 +290,7 @@ int pnl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	{
 		pr_warn("[pnlfs] --- mkdir ---\n");
 		pr_warn("[pnlfs] File exists\n");
+		brelse(bh);
 		iput(inode);
 		return -EEXIST;
 	}
@@ -295,6 +299,7 @@ int pnl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	{
 		pr_warn("[pnlfs] --- mkdir ---\n");
 		pr_warn("[pnlfs] Exceeded max entries in directory\n");
+		brelse(bh);
 		iput(inode);
 		return -ENOSPC;
 	}
@@ -303,6 +308,7 @@ int pnl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	if(!strncpy(dst, src, PNLFS_FILENAME_LEN)) {
 		pr_warn("[pnlfs] --- mkdir ---\n");
 		pr_warn("[pnlfs] Filename copy into dir_block failed\n");
+		brelse(bh);
 		iput(inode);
 		return -ENOMEM;
 	}
@@ -340,9 +346,10 @@ int pnl_rmdir(struct inode *dir, struct dentry *dentry)
 	dir_info = container_of(dir, struct pnlfs_inode_info, vfs_inode);
 	dir_index = dir_info->index_block;
 	bh = sb_bread(sb, dir_index);
-	if (!sb) {
+	if (!bh) {
 		pr_warn("[pnlfs] --- unlink ---\n");
 		pr_warn("[pnlfs] sb_read() failed\n");
+		brelse(bh);
 		return -EIO;
 	}
 	dir_block = (struct pnlfs_dir_block *) bh->b_data;
