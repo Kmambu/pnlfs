@@ -43,6 +43,27 @@ struct dentry *pnl_lookup(struct inode *dir, struct dentry *dentry,
 	return NULL;
 }
 
+int pnl_new_index_block(struct super_block *sb, struct inode *inode)
+{
+	struct pnlfs_sb_info *sb_info;
+	struct pnlfs_inode_info *i_info;
+	unsigned long *bfree_bitmap;
+	u32 idx;
+
+	i_info = container_of(inode, struct pnlfs_inode_info, vfs_inode);
+	sb_info = (struct pnlfs_sb_info *) sb->s_fs_info;
+	bfree_bitmap = sb_info->bfree_bitmap;
+	idx = (u32) find_first_bit(bfree_bitmap, sb_info->nr_blocks);
+	if (idx == sb_info->nr_blocks)
+	{
+		pr_warn("[pnlfs] %s : no more blocks ot allocate\n",
+				__func__);
+		return -ENOSPC;
+	}
+	bitmap_clear(bfree_bitmap, idx, 1);
+	return idx;
+}
+
 struct inode *pnl_new_inode(struct inode *dir, umode_t mode, int *error)
 {
 	struct inode *inode;

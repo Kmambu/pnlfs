@@ -6,6 +6,7 @@
 #include <uapi/asm-generic/errno.h>
 #include <uapi/linux/stat.h>
 #include <uapi/linux/fs.h>
+#include "pnl_iops.h"
 #include "pnlfs.h"
 // /!\ Open the index_block beforehand on a buffer head with sb_bread()
 int pnl_find_index_block(struct pnlfs_file_index_block *index_block,
@@ -81,99 +82,59 @@ ssize_t pnl_read(struct file *filp, char __user *buf, size_t size,
 	// Reads without pejudice about the data as long as in the boundary of
 	// the file (no \0 check!)
 {
-	struct buffer_head *bh, *bh2;
-	struct pnlfs_file_index_block *index_block;
-	struct pnlfs_inode_info *i_info;
-	int start = 0, len = size, idx, i, blk, nb, slen;
 	struct inode *inode = filp->f_inode;
-	i_info = container_of(inode, struct pnlfs_inode_info, vfs_inode);
+	struct pnlfs_inode_info *i_info;
+	struct buffer_head *bh, *bh2;
+	struct pnlfs_file_index_block *file_index_block;
+	u32 bno, r_start, s_len = 0, bidx, ret = 0, r_done = 0;
 
-	if (inode->i_size < (*off))
+	if (inode->i_size == PNLFS_MAX_BLOCKS_PER_FILE)
 	{
-		pr_warn("[pnlfs] %s : attempt to read out of bounds\n", __func__);
-		return -EFAULT;
-	}
-
-	pr_warn("[pnlfs] %s : fops=%lld isize=%lld \n", __func__,
-			filp->f_pos, inode->i_size);
-
-	if (filp->f_pos >= inode->i_size) { // EOF
-		pr_warn("[pnlfs] %s : EOF\n", __func__);
-		return 0;
+		pr_warn("[pnlfs] %s : exceeding max file capacity\n", __func__);
+		return -ENOSPC;
 	}
 	if (S_ISDIR(filp->f_mode))
 	{
 		pr_warn("[pnlfs] %s : not a directory\n", __func__);
-		return -ENOTDIR;
+		return -EISDIR;
 	}
-	idx = i_info->index_block;
-	bh = sb_bread(inode->i_sb, idx);
+
+	i_info = container_of(inode, struct pnlfs_inode_info, vfs_inode);
+	if (i_info->nr_entries == 0)
+		return 0;
+	bh = sb_bread(inode->i_sb, i_info->index_block);
 	if (!bh)
 	{
-		pr_warn("[pnlfs] %s : error when opening block sector\n",
-				__func__);
+		pr_warn("[pnlfs] %s : error when opening block sector %d\n",
+				__func__, i_info->index_block);
 		return -EIO;
 	}
-	index_block = (struct pnlfs_file_index_block *) bh->b_data;
-	i = nb = 0;
+	file_index_block = (struct pnlfs_file_index_block *) bh->b_data;
 
-	blk = (*off) / PNLFS_BLOCK_SIZE;
-	start = (*off) % PNLFS_BLOCK_SIZE;
-	while (len != 0)
-	{
-		pr_warn("[pnlfs] %s : entering loop\n", __func__);
-		blk = pnl_find_index_block(index_block, blk);
-		// if no blocks were found (unlikely)
-		//
-		if (blk == PNLFS_MAX_BLOCKS_PER_FILE)
+	bidx = (*off) / PNLFS_BLOCK_SIZE;
+	r_start = (*off) % PNLFS_BLOCK_SIZE;
+	while (!r_done) {
+		bno = pnl_find_index_block(file_index_block, bidx);
+		bno = le32_to_cpu(file_index_block->blocks[bno]);
+		bh2 = sb_bread(inode->i_sb, bno);
+		s_len = strnlen(bh2->b_data + (*off),
+				PNLFS_BLOCK_SIZE - r_start);
+		if (s_len == PNLFS_BLOCK_SIZE - r_start) // fin du bloc
 		{
-			pr_warn("[pnlfs] %s : no block sectors to read\n",
-					__func__);
-			brelse(bh);
-			return -EIO;
-		}
-
-		blk = le32_to_cpu(index_block->blocks[blk]);
-		bh2 = sb_bread(inode->i_sb, blk);
-		if (!bh2)
-		{
-			pr_warn("[pnlfs] %s : error when opening block sector\n",
-					__func__);
-			brelse(bh);
-			return -EIO;
-		}
-
-		slen = strnlen(start + bh2->b_data, PNLFS_BLOCK_SIZE - start);
-		pr_warn("[pnlfs] %s : start = %d\n", __func__, start);
-		if (slen >= PNLFS_BLOCK_SIZE - start) {
-			pr_warn("[pnlfs] %s : exceeding block sector : %d\n", __func__,
-					slen);
-			memcpy(nb + buf, (char *)(start + bh2->b_data),
-					slen);
-			pr_warn("[pnlfs] %s : %s\n", __func__, (char *)(start + bh2->b_data));
-			nb += slen;
-			len -= slen;
-			start = 0;
-			blk++;
-			/* filp->f_pos += slen;*/
-			*off+=slen;
+			r_start = 0;
+			if (!((char)bh2->b_data[PNLFS_BLOCK_SIZE])) // \0
+				r_done = 1;
+			bidx++;
 		} else {
-			pr_warn("[pnlfs] %s : not exceeding block sector : %d\n", __func__, slen);
-			memcpy(nb + buf, (char *)(start + bh2->b_data),
-					slen);
-			pr_warn("[pnlfs] %s : %s\n", __func__, (char *)(start + bh2->b_data));
-			nb += slen;
-			len = 0;
-			/* filp->f_pos += slen;*/
-			brelse(bh2);
-			*off+=slen;
-			break;
+			r_done = 1;
 		}
+		memcpy(buf + ret, bh2->b_data, s_len);
+		ret += s_len;
 		brelse(bh2);
 	}
 	brelse(bh);
-	pr_warn("[pnlfs] %s : exiting (off = %lld, pos = %lld, size=%lld)\n", __func__, (*off), filp->f_pos, inode->i_size);
-	return nb;
+	(*off) += ret;
+	return ret;
 }
 
 
@@ -182,117 +143,91 @@ ssize_t pnl_write(struct file *filp, const char __user *buf, size_t size,
 	// Reads without pejudice about the data as long as in the boundary of
 	// the file (no \0 check!)
 {
-	struct buffer_head *bh, *bh2;
-	struct pnlfs_file_index_block *index_block;
-	struct pnlfs_inode_info *i_info;
-	int append = 0;
-	int old_size;
-
-	int start = 0, len = size, idx, i, blk, nb, slen;
 	struct inode *inode = filp->f_inode;
+	struct pnlfs_inode_info *i_info;
+	struct buffer_head *bh, *bh2;
+	struct pnlfs_file_index_block *file_index_block;
+	u32 bno, w_start, s_len = 0, w_end = 0, bidx, ret = 0, nr_entries = 0;
+
+	if (inode->i_size == PNLFS_MAX_BLOCKS_PER_FILE)
+	{
+		pr_warn("[pnlfs] %s : exceeding max file capacity\n", __func__);
+		return -ENOSPC;
+	}
+	if (S_ISDIR(filp->f_mode))
+	{
+		pr_warn("[pnlfs] %s : not a directory\n", __func__);
+		return -EISDIR;
+	}
+
 	i_info = container_of(inode, struct pnlfs_inode_info, vfs_inode);
-	pr_warn("[pnlfs] %s : entering\n", __func__);
-
-	old_size = inode->i_size;
-
-	/* quand on fait echo toto > foo ou >> le comportement est completement
-	 * different, le chevron simple remet inode->i_size a 0 tout seul et le
-	 * double chevron laisse la valeur
-	 * VERIFIER AVEC UN FICHIER VIDE 
-	 */
-	pr_warn("[pnlfs] %s : non virgin file %lld \n", __func__,
-			inode->i_size);
-
-	if (inode->i_size + size >
-			PNLFS_MAX_BLOCKS_PER_FILE * PNLFS_BLOCK_SIZE){
-		return -1;
-	}
-
-	if (S_ISDIR(filp->f_mode)) {
-		return -ENOTDIR;
-	}
-
-	idx = i_info->index_block;
-	if (i_info->nr_entries == 0){
-		//aloue un block
-	}
-
-	bh = sb_bread(inode->i_sb, idx);
-	if (!bh){
+	bh = sb_bread(inode->i_sb, i_info->index_block);
+	if (!bh)
+	{
+		pr_warn("[pnlfs] %s : error when opening block sector %d\n",
+				__func__, i_info->index_block);
 		return -EIO;
 	}
+	file_index_block = (struct pnlfs_file_index_block *) bh->b_data;
+	if ((i_info->nr_entries == 0) && (inode->i_size == 0))
+	{
+		bno = pnl_new_index_block(inode->i_sb, inode);
+		file_index_block->blocks[0] = cpu_to_le32(bno);
+		i_info->nr_entries++;
+	}
 
-	index_block = (struct pnlfs_file_index_block *) bh->b_data;
-	i = nb = 0;
-
-	if (filp->f_flags & O_APPEND){
-		// le denier
-		blk = i_info->nr_entries - 1;
-		start = inode->i_size % PNLFS_BLOCK_SIZE;
-		append = 1;
-		// ALLOCATION SI CA DEBORDE
+	if (filp->f_flags & O_APPEND) {
+		bidx = i_info->nr_entries - 1;
+		w_start = inode->i_size % PNLFS_BLOCK_SIZE;
 	} else {
-		//normal offset
-		blk = (*off) / PNLFS_BLOCK_SIZE;
-		start = (*off) % PNLFS_BLOCK_SIZE;
-		/* inode->i_size = 0;*/
+		bidx = (*off) / PNLFS_BLOCK_SIZE;
+		w_start = (*off) % PNLFS_BLOCK_SIZE;
 	}
 
-	while (len != 0) {
-		blk = pnl_find_index_block(index_block, blk);
-		if (blk == PNLFS_MAX_BLOCKS_PER_FILE){
-			brelse(bh);
-			return -EIO;
+	while(buf[s_len++] != '\0');
+	if (size < s_len)
+		s_len = size;
+	if (s_len == 0)
+		goto write_out;
+	pr_warn("buf = \"%s\", len = %ld\n", buf, strlen(buf));
+	nr_entries = bidx + 1;
+	while (s_len > 0) {
+		bno = pnl_find_index_block(file_index_block, bidx);
+		if (bno == PNLFS_MAX_BLOCKS_PER_FILE)
+		{
+			bno = pnl_new_index_block(inode->i_sb, inode);
+			file_index_block->blocks[bidx] = cpu_to_le32(bno);
 		}
-
-		blk = le32_to_cpu(index_block->blocks[blk]);
-		bh2 = sb_bread(inode->i_sb, blk);
-		if (!bh2) {
-			brelse(bh);
-			return -EIO;
-		}
-
-		slen = strnlen(buf, PNLFS_BLOCK_SIZE - start);
-		if (slen >= PNLFS_BLOCK_SIZE - start) {
-			pr_warn("[pnlfs] %s : not exceeding block sector : %d\n", __func__, slen);
-			memcpy((char *)(start + bh2->b_data), buf, slen);
-			nb += slen;
-			len -= slen;
-			start = 0;
-			blk++;
-			// ALLOCATION SI CA DEBORDE
-			*off+=slen;
-			if (append)
-				inode->i_size += slen;
-			/* inode->i_size += slen;*/
-
+		bno = le32_to_cpu(file_index_block->blocks[bno]);
+		bh2 = sb_bread(inode->i_sb, bno);
+		w_end = w_start + s_len;
+		pr_warn("w_start = %d\n", w_start);
+		pr_warn("w_end = %d\n", w_end);
+		pr_warn("bidx = %d\n", bidx);
+		pr_warn("s_len = %d\n", s_len);
+		pr_warn("size = %ld\n", size);
+		if (w_end > PNLFS_BLOCK_SIZE) {
+			memcpy(bh2->b_data + w_start, buf + ret,
+					PNLFS_BLOCK_SIZE - w_start);
+			s_len -= (PNLFS_BLOCK_SIZE - w_start);
+			w_start = 0;
+			ret += (PNLFS_BLOCK_SIZE - w_start);
+			bidx++;
 		} else {
-			pr_warn("[pnlfs] %s : not exceeding block sector : %d\n", __func__, slen);
-			memcpy((char *)(start + bh2->b_data), buf, slen);
-			nb += slen;
-			len = 0;
-			brelse(bh2);
-			*off+=slen;
-			// ALLOCATION SI CA DEBORDE
-			if (append)
-				inode->i_size += slen;
-			/* inode->i_size += slen;*/
-			break;
+			memcpy(bh2->b_data + w_start, buf + ret, s_len);
+			ret += s_len;
+			s_len = 0;
 		}
-
 		brelse(bh2);
+		nr_entries++;
 	}
-
-	if (old_size){
-		pr_warn("[pnlfs] %s : append is false patch me\n", __func__);
-		inode->i_size = strlen(buf);
-		*off = strlen(buf);
-	}
+write_out :
+	i_info->nr_entries = nr_entries;
 	brelse(bh);
-	pr_warn("[pnlfs] %s : exiting (off = %lld, pos = %lld, size=%lld)\n",
-			__func__, (*off), filp->f_pos, inode->i_size);
-
-	return inode->i_size;
+	(*off) += ret;
+	filp->f_pos = (*off);
+	inode->i_size = (*off);
+	return ret;
 }
 
 

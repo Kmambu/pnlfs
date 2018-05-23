@@ -1,8 +1,11 @@
 #ifndef _PNL_IOPS_H
 #define _PNL_IOPS_H
+
+#include "pnlfs.h"
 struct inode *pnl_new_inode(struct inode *dir, umode_t mode, int *error);
 int pnl_find_dir_entry(struct pnlfs_dir_block *dir_block,
 		struct dentry *dentry);
+int pnl_new_index_block(struct super_block *sb, struct inode *inode);
 int pnl_free_dir_entry(struct pnlfs_dir_block *dir_block);
 struct dentry *pnl_lookup(struct inode *dir, struct dentry *dentry,
 		unsigned int flags);
