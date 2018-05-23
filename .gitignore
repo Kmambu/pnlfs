@@ -1,0 +1,5 @@
+# Object files
+*.o
+*.ko
+./src/Module.symvers
+./src/modules.order
