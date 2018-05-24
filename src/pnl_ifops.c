@@ -56,7 +56,7 @@ int pnl_readdir(struct file *file, struct dir_context *ctx)
 		return 0;
 	bh = sb_bread(sb, index_block);
 	dir_block = (struct pnlfs_dir_block *) bh->b_data;
-	for(i=0; i<PNLFS_MAX_DIR_ENTRIES; i++)
+	for(i=0; i<i_info->nr_entries; i++)
 	{
 		raw_child = dir_block->files[i];
 		ino = le32_to_cpu(raw_child.inode);
@@ -134,6 +134,7 @@ ssize_t pnl_read(struct file *filp, char __user *buf, size_t size,
 	}
 	brelse(bh);
 	(*off) += ret;
+	mark_inode_dirty(inode);
 	return ret;
 }
 
@@ -190,7 +191,8 @@ ssize_t pnl_write(struct file *filp, const char __user *buf, size_t size,
 	if (s_len == 0)
 		goto write_out;
 	pr_warn("buf = \"%s\", len = %ld\n", buf, strlen(buf));
-	nr_entries = bidx + 1;
+	//nr_entries = bidx + 1;
+	nr_entries = bidx;
 	while (s_len > 0) {
 		bno = pnl_find_index_block(file_index_block, bidx);
 		if (bno == PNLFS_MAX_BLOCKS_PER_FILE)
@@ -218,15 +220,18 @@ ssize_t pnl_write(struct file *filp, const char __user *buf, size_t size,
 			ret += s_len;
 			s_len = 0;
 		}
+		mark_buffer_dirty(bh2);
 		brelse(bh2);
 		nr_entries++;
 	}
 write_out :
 	i_info->nr_entries = nr_entries;
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	(*off) += ret;
 	filp->f_pos = (*off);
 	inode->i_size = (*off);
+	mark_inode_dirty(inode);
 	return ret;
 }
 

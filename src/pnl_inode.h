@@ -3,5 +3,6 @@
 struct inode *pnl_iget(struct super_block *sb, unsigned long ino);
 struct inode *pnl_alloc_inode(struct super_block *sb);
 void pnl_destroy_inode(struct inode *inode);
+int pnl_write_inode(struct inode *inode, struct writeback_control *wbc);
 #endif
 

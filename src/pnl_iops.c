@@ -32,6 +32,7 @@ struct dentry *pnl_lookup(struct inode *dir, struct dentry *dentry,
 			break;
 		}
 	}
+	mark_buffer_dirty(bh);
 	brelse(bh);
 
 	if(ino == -1) {
@@ -116,18 +117,20 @@ struct inode *pnl_new_inode(struct inode *dir, umode_t mode, int *error)
 	return inode;
 }
 
-int pnl_find_dir_entry(struct pnlfs_dir_block *dir_block, struct dentry *dentry)
+int pnl_find_dir_entry(struct pnlfs_dir_block *dir_block, struct dentry *dentry,
+		uint32_t nr_entries)
 {
 	const char *src = dentry->d_name.name;
 	char *dst;
 	uint32_t i;
-	for (i=0; i<PNLFS_MAX_DIR_ENTRIES; i++)
+	for (i=0; i<nr_entries; i++)
 	{
 		dst = dir_block->files[i].filename;
+		pr_warn("name : %s\n", dst);
 		if (!strcmp(dst, src))
 			return i;
 	}
-	return PNLFS_MAX_DIR_ENTRIES;
+	return nr_entries;
 }
 
 int pnl_free_dir_entry(struct pnlfs_dir_block *dir_block)
@@ -172,32 +175,28 @@ int pnl_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 	}
 
 	bh = sb_bread(inode->i_sb, i_info->index_block); 
-	if(!bh) {
+	if(!bh)
+	{
 		pr_warn("[pnlfs] --- create ---\n");
 		pr_warn("[pnlfs] sb_bread failed\n");
 		iput(inode);
 		return -ENOMEM;
 	}
 	dir_block = (struct pnlfs_dir_block *) bh->b_data;
-	idx = pnl_find_dir_entry(dir_block, dentry);
-	if (idx != PNLFS_MAX_DIR_ENTRIES)
+	if (i_info->nr_entries == PNLFS_MAX_DIR_ENTRIES)
 	{
-		pr_warn("[pnlfs] --- create ---\n");
-		pr_warn("[pnlfs] File exists\n");
-		brelse(bh);
+		pr_warn("[pnlfs] %s : exceeded max dir entries\n", __func__);
 		iput(inode);
+		return -ENOMEM;
+	}
+	idx = pnl_find_dir_entry(dir_block, dentry, i_info->nr_entries);
+	if (idx != i_info->nr_entries)
+	{
+		pr_warn("[pnlfs] %s : file exists\n", __func__);
+		brelse(bh);
 		return -EEXIST;
 	}
-	idx = pnl_free_dir_entry(dir_block);
-	if (idx == PNLFS_MAX_DIR_ENTRIES)
-	{
-		pr_warn("[pnlfs] --- create ---\n");
-		pr_warn("[pnlfs] Exceeded max enteies in directory\n");
-		brelse(bh);
-		iput(inode);
-		return -ENOSPC;
-	}
-	dst = dir_block->files[idx].filename;
+	dst = dir_block->files[nr_entries].filename;
 	src = dentry->d_name.name;
 	if (!strncpy(dst, src, PNLFS_FILENAME_LEN)) {
 		pr_warn("[pnlfs] --- create ---\n");
@@ -206,7 +205,8 @@ int pnl_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 		iput(inode);
 		return -ENOMEM;
 	}
-	dir_block->files[idx].inode = cpu_to_le32(inode->i_ino);
+	dir_block->files[nr_entries].inode = cpu_to_le32(inode->i_ino);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 
 	i_info->nr_entries++;
@@ -215,26 +215,20 @@ int pnl_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 	d_instantiate(dentry, inode);
 	i_info = container_of(inode, struct pnlfs_inode_info, vfs_inode);
 	pr_info("[pnlfs] pnl_create() : success\n");
-	pr_info("[pnlfs] inode : <%p>\n", inode);
-	pr_info("[pnlfs] i_info : <%p>\n", i_info);
-	pr_info("[pnlfs] i_mode : %d\n", inode->i_mode);
-	pr_info("[pnlfs] i_ino : %ld\n", inode->i_ino);
-	pr_info("[pnlfs] i_size : %lld\n", inode->i_size);
-	pr_info("[pnlfs] i_blocks : %ld\n", inode->i_blocks);
-	pr_info("[pnlfs] index_block : %d\n", i_info->index_block);
-	pr_info("[pnlfs] nr_entries : %d\n", i_info->nr_entries);
 	return 0;
 }
 
 int pnl_unlink(struct inode *dir, struct dentry *dentry)
 {
-	uint32_t idx = 0, dir_index, ino;
+	uint32_t idx = 0, dir_index, ino, i, nr_entries;
 	struct super_block *sb = dir->i_sb;
 	struct buffer_head *bh;
 	struct pnlfs_dir_block *dir_block;
 	struct pnlfs_inode_info *dir_info, *i_info;
 	struct inode *inode;
 	struct pnlfs_sb_info *sb_info;
+	struct pnlfs_file_index_block *file_index_block;
+	char buf[PNLFS_FILENAME_LEN];
 	const char * name = dentry->d_name.name;
 	unsigned long *ifree_bitmap, *bfree_bitmap;
 	dir_info = container_of(dir, struct pnlfs_inode_info, vfs_inode);
@@ -247,8 +241,12 @@ int pnl_unlink(struct inode *dir, struct dentry *dentry)
 		return -EIO;
 	}
 	dir_block = (struct pnlfs_dir_block *) bh->b_data;
-	idx = pnl_find_dir_entry(dir_block, dentry);
-	if (idx == PNLFS_MAX_DIR_ENTRIES)
+	nr_entries = dir_info->nr_entries;
+	pr_warn("[pnlfs] %s : dir_nr_entries=%d\n", __func__, nr_entries);
+	nr_entries = dir_info->nr_entries;
+	idx = pnl_find_dir_entry(dir_block, dentry, nr_entries);
+	pr_warn("[pnlfs] %s : dir_nr_entries=%d\n", __func__, nr_entries);
+	if (idx == nr_entries)
 	{
 		pr_warn("[pnlfs] --- unlink ---\n");
 		pr_warn("[pnlfs] %s doesn't exist\n", name);
@@ -257,15 +255,37 @@ int pnl_unlink(struct inode *dir, struct dentry *dentry)
 	}
 	sb_info = (struct pnlfs_sb_info *) sb->s_fs_info;
 	ino = le32_to_cpu(dir_block->files[idx].inode);
-	dir_block->files[idx].inode = cpu_to_le32(0);
-	brelse(bh);
+	//strcpy(dir_block->files[idx].filename, "");
 	inode = pnl_iget(sb, ino);
 	i_info = container_of(inode, struct pnlfs_inode_info, vfs_inode);
+	for (i = idx; i < dir_info->nr_entries - 1; i++) {
+		dir_block->files[i].inode = dir_block->files[i+1].inode;
+		strcpy(buf, dir_block->files[i].filename);
+		pr_warn("[pnlfs] %s : buf = %s\n", __func__, buf);
+		strcpy(dir_block->files[i+1].filename, buf);
+		//strcpy(dir_block->files[i].filename,
+		//       dir_block->files[i+1].filename);
+	}
+	mark_buffer_dirty(bh);
+	brelse(bh);
 	ifree_bitmap = sb_info->ifree_bitmap;
 	bfree_bitmap = sb_info->bfree_bitmap;
+	if (i_info->nr_entries <= 0) {
+		bh = sb_bread(inode->i_sb, i_info->index_block);
+		file_index_block = (struct pnlfs_file_index_block *) bh->b_data;
+		for (i = 0; i < i_info->nr_entries; i++)
+		{
+			idx = le32_to_cpu(file_index_block->blocks[i]);
+			bitmap_set(bfree_bitmap, idx, 1);
+		}
+		brelse(bh);
+	}
+	pr_warn("CHECK\n");
 	bitmap_set(ifree_bitmap, inode->i_ino, 1);
 	bitmap_set(bfree_bitmap, i_info->index_block, 1);
 	inode_dec_link_count(inode);
+	mark_inode_dirty(dir);
+	mark_inode_dirty(inode);
 	iput(inode);
 	dir_info->nr_entries--;
 	return 0;
@@ -283,13 +303,14 @@ int pnl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	uint32_t nr_entries, idx;
 	i_info = container_of(dir, struct pnlfs_inode_info, vfs_inode);
 	nr_entries = i_info->nr_entries;
+
 	if (i_info->nr_entries >= PNLFS_MAX_DIR_ENTRIES) {
-		pr_warn("[pnlfs] --- mkdir ---\n");
+		pr_warn("[pnlfs] --- create ---\n");
 		pr_warn("[pnlfs] Too much entries\n");
 		return -ENOSPC;
 	}
 	if (dentry->d_name.len > PNLFS_FILENAME_LEN) {
-		pr_warn("[pnlfs] --- mkdir ---\n");
+		pr_warn("[pnlfs] --- create ---\n");
 		pr_warn("[pnlfs] Filename too long\n");
 		return -ENAMETOOLONG;
 	}
@@ -298,43 +319,42 @@ int pnl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 		err = PTR_ERR(inode);
 		return err;
 	}
+
 	bh = sb_bread(inode->i_sb, i_info->index_block); 
-	if(!bh) {
-		pr_warn("[pnlfs] --- mkdir ---\n");
+	if(!bh)
+	{
+		pr_warn("[pnlfs] --- create ---\n");
 		pr_warn("[pnlfs] sb_bread failed\n");
 		iput(inode);
 		return -ENOMEM;
 	}
 	dir_block = (struct pnlfs_dir_block *) bh->b_data;
-	idx = pnl_find_dir_entry(dir_block, dentry);
-	if (idx != PNLFS_MAX_DIR_ENTRIES)
+	if (i_info->nr_entries == PNLFS_MAX_DIR_ENTRIES)
 	{
-		pr_warn("[pnlfs] --- mkdir ---\n");
-		pr_warn("[pnlfs] File exists\n");
-		brelse(bh);
+		pr_warn("[pnlfs] %s : exceeded max dir entries\n", __func__);
 		iput(inode);
+		return -ENOMEM;
+	}
+	idx = pnl_find_dir_entry(dir_block, dentry, i_info->nr_entries);
+	if (idx != i_info->nr_entries)
+	{
+		pr_warn("[pnlfs] %s : file exists\n", __func__);
+		brelse(bh);
 		return -EEXIST;
 	}
-	idx = pnl_free_dir_entry(dir_block);
-	if (idx == PNLFS_MAX_DIR_ENTRIES)
-	{
-		pr_warn("[pnlfs] --- mkdir ---\n");
-		pr_warn("[pnlfs] Exceeded max entries in directory\n");
-		brelse(bh);
-		iput(inode);
-		return -ENOSPC;
-	}
-	dst = dir_block->files[idx].filename;
+	dst = dir_block->files[nr_entries].filename;
 	src = dentry->d_name.name;
-	if(!strncpy(dst, src, PNLFS_FILENAME_LEN)) {
-		pr_warn("[pnlfs] --- mkdir ---\n");
+	if (!strncpy(dst, src, PNLFS_FILENAME_LEN)) {
+		pr_warn("[pnlfs] --- create ---\n");
 		pr_warn("[pnlfs] Filename copy into dir_block failed\n");
 		brelse(bh);
 		iput(inode);
 		return -ENOMEM;
 	}
-	dir_block->files[idx].inode = cpu_to_le32(inode->i_ino);
+	dir_block->files[nr_entries].inode = cpu_to_le32(inode->i_ino);
+	mark_buffer_dirty(bh);
 	brelse(bh);
+
 	i_info->nr_entries++;
 	inode_inc_link_count(dir);
 	inode_inc_link_count(inode);
@@ -355,7 +375,7 @@ int pnl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 
 int pnl_rmdir(struct inode *dir, struct dentry *dentry)
 {
-	uint32_t idx = 0, dir_index, ino;
+	uint32_t idx = 0, dir_index, ino, i;
 	struct super_block *sb = dir->i_sb;
 	struct buffer_head *bh;
 	struct pnlfs_dir_block *dir_block;
@@ -374,8 +394,8 @@ int pnl_rmdir(struct inode *dir, struct dentry *dentry)
 		return -EIO;
 	}
 	dir_block = (struct pnlfs_dir_block *) bh->b_data;
-	idx = pnl_find_dir_entry(dir_block, dentry);
-	if (idx == PNLFS_MAX_DIR_ENTRIES)
+	idx = pnl_find_dir_entry(dir_block, dentry, dir_info->nr_entries);
+	if (idx == dir_info->nr_entries)
 	{
 		pr_warn("[pnlfs] --- unlink ---\n");
 		pr_warn("[pnlfs] %s doesn't exist\n", name);
@@ -384,16 +404,25 @@ int pnl_rmdir(struct inode *dir, struct dentry *dentry)
 	}
 	sb_info = (struct pnlfs_sb_info *) sb->s_fs_info;
 	ino = le32_to_cpu(dir_block->files[idx].inode);
-	dir_block->files[idx].inode = cpu_to_le32(0);
-	brelse(bh);
+	strcpy(dir_block->files[idx].filename, "");
 	inode = pnl_iget(sb, ino);
 	i_info = container_of(inode, struct pnlfs_inode_info, vfs_inode);
+	for (i = idx; i < dir_info->nr_entries - 1; i++) {
+		dir_block->files[i].inode = dir_block->files[i+1].inode;
+		strcpy(dir_block->files[i].filename,
+		       dir_block->files[i+1].filename);
+	}
+	mark_buffer_dirty(bh);
+	brelse(bh);
+	pr_warn("CHECK\n");
 	ifree_bitmap = sb_info->ifree_bitmap;
 	bfree_bitmap = sb_info->bfree_bitmap;
 	bitmap_set(ifree_bitmap, inode->i_ino, 1);
 	bitmap_set(bfree_bitmap, i_info->index_block, 1);
 	inode_dec_link_count(inode);
 	inode_dec_link_count(dir);
+	mark_inode_dirty(inode);
+	mark_inode_dirty(dir);
 	iput(inode);
 	dir_info->nr_entries--;
 	return 0;
@@ -426,8 +455,8 @@ int pnl_rename(struct inode *old_dir, struct dentry *old_dentry,
 	}
 	name = old_dentry->d_name.name;
 	dir_block = (struct pnlfs_dir_block *) bh->b_data;
-	idx = pnl_find_dir_entry(dir_block, old_dentry);
-	if (idx == PNLFS_MAX_DIR_ENTRIES)
+	idx = pnl_find_dir_entry(dir_block, old_dentry, i_info->nr_entries);
+	if (idx == i_info->nr_entries)
 	{
 		pr_warn("[pnlfs] --- rename ---\n");
 		pr_warn("[pnlfs] old_dentry %s does not exist\n", name);
@@ -454,6 +483,7 @@ int pnl_rename(struct inode *old_dir, struct dentry *old_dentry,
 			return -EIO;
 		}
 		file->inode = cpu_to_le32(new_inode->i_ino);
+		mark_buffer_dirty(bh);
 		brelse(bh);
 		new_inode->i_size = old_inode->i_size;
 		i_info = container_of(old_inode, struct pnlfs_inode_info,
@@ -467,6 +497,7 @@ int pnl_rename(struct inode *old_dir, struct dentry *old_dentry,
 		mark_inode_dirty(old_inode);
 		iput(old_inode);
 		mark_inode_dirty(new_inode);
+		mark_inode_dirty(new_dir);
 		d_instantiate(new_dentry, new_inode);
 		return 0;
 	}
@@ -501,7 +532,9 @@ int pnl_rename(struct inode *old_dir, struct dentry *old_dentry,
 	}
 	file2->inode = cpu_to_le32(new_inode->i_ino);
 	file->inode = cpu_to_le32(0);
+	mark_buffer_dirty(bh2);
 	brelse(bh2);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	ni_info->nr_entries++;
 	i_info->nr_entries--;
@@ -510,11 +543,14 @@ int pnl_rename(struct inode *old_dir, struct dentry *old_dentry,
 	ni_info = container_of(new_inode, struct pnlfs_inode_info, vfs_inode);
 	ni_info->nr_entries = i_info->nr_entries;
 	ni_info->index_block = i_info->index_block;
+	new_inode->i_size = old_inode->i_size;
 	ifree_bitmap = sb_info->ifree_bitmap;
 	bitmap_set(ifree_bitmap, old_inode->i_ino, 1);
 	mark_inode_dirty(old_inode);
+	mark_inode_dirty(old_dir);
 	iput(old_inode);
 	mark_inode_dirty(new_inode);
+	mark_inode_dirty(new_dir);
 	d_instantiate(new_dentry, new_inode);
 	return 0;
 }
