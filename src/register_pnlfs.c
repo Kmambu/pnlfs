@@ -23,10 +23,79 @@ void pnl_put_super (struct super_block *sb) {
 	kfree(sb_info);
 }
 
+int pnl_sync_fs(struct super_block *sb, int wait)
+{
+	struct pnlfs_superblock *raw_sb;
+	struct pnlfs_sb_info *sbi;
+	struct buffer_head *bh;
+	uint32_t bno = PNLFS_SB_BLOCK_NR, k, i, j, lno;
+	unsigned long *ifree_bitmap, *bfree_bitmap, *b_data;
+
+	sbi = (struct pnlfs_sb_info *) sb->s_fs_info;
+	bh = sb_bread(sb, bno);
+	raw_sb = (struct pnlfs_superblock *) bh->b_data;
+	raw_sb->nr_free_inodes = cpu_to_le32(sbi->nr_free_inodes);
+	raw_sb->nr_free_blocks = cpu_to_le32(sbi->nr_free_blocks);
+	mark_buffer_dirty(bh);
+	if (wait) {
+		pr_warn("[pnlfs] %s : WAIT_ON\n", __func__);
+		if(sync_dirty_buffer(bh) != 0)
+			pr_warn("FAILURE\n");
+	}
+	pr_warn("[pnlfs] %s : block sector %d successfully written\n",
+			__func__, bno);
+	brelse(bh);
+	
+	ifree_bitmap = sbi->ifree_bitmap;
+	bfree_bitmap = sbi->bfree_bitmap;
+	lno = PNLFS_BLOCK_SIZE / sizeof(unsigned long);
+	bno += 1 + sbi->nr_istore_blocks;
+	k = 0;
+	for (i=0; i<sbi->nr_ifree_blocks; i++)
+	{
+		bh = sb_bread(sb, bno + i);
+		b_data = (unsigned long *) bh->b_data;
+		for (j=0; j<lno; j++)
+			b_data[j] = cpu_to_le64(ifree_bitmap[k++]);
+		mark_buffer_dirty(bh);
+		if (wait) {
+			pr_warn("[pnlfs] %s : WAIT_ON\n", __func__);
+			if(sync_dirty_buffer(bh) != 0)
+				pr_warn("FAILURE\n");
+		}
+		pr_warn("[pnlfs] %s : block sector %d successfully written\n",
+				__func__, bno);
+		brelse(bh);
+	}
+	
+	bno += sbi->nr_ifree_blocks;
+	k = 0;
+	for (i=0; i<sbi->nr_bfree_blocks; i++)
+	{
+		bh = sb_bread(sb, bno + i);
+		b_data = (unsigned long *) bh->b_data;
+		for (j=0; j<lno; j++)
+			b_data[j] = cpu_to_le64(bfree_bitmap[k++]);
+		mark_buffer_dirty(bh);
+		if (wait) {
+			pr_warn("[pnlfs] %s : WAIT_ON\n", __func__);
+			if(sync_dirty_buffer(bh) != 0)
+				pr_warn("FAILURE\n");
+		}
+		pr_warn("[pnlfs] %s : block sector %d successfully written\n",
+				__func__, bno);
+		brelse(bh);
+	}
+
+	return 0;
+}
+
 struct super_operations pnl_sops = {
 	.put_super = pnl_put_super,
 	.alloc_inode = pnl_alloc_inode,
 	.destroy_inode = pnl_destroy_inode,
+	.sync_fs = pnl_sync_fs,
+	.write_inode = pnl_write_inode,
 };
 
 int pnl_fill_super(struct super_block *sb, void *data, int silent)
@@ -112,6 +181,7 @@ struct dentry *pnl_mount(struct file_system_type *fs_type, int flags,
 
 void pnl_kill_sb(struct super_block *sb)
 {
+	pr_warn("[pnlfs] %s : calling kill_block_super()\n", __func__);
 	kill_block_super(sb);
 }
 
@@ -132,7 +202,7 @@ int init_module(void)
 	return 0;
 }
 
-void cleanup(void)
+void cleanup_module(void)
 {
 	if (unregister_filesystem(&pnlfs_type) != 0)
 		pr_err("[pnlfs] unregistration failed unexpectedly\n");
