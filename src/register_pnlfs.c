@@ -94,8 +94,8 @@ struct super_operations pnl_sops = {
 	.put_super = pnl_put_super,
 	.alloc_inode = pnl_alloc_inode,
 	.destroy_inode = pnl_destroy_inode,
-	.sync_fs = pnl_sync_fs,
-	.write_inode = pnl_write_inode,
+	//.sync_fs = pnl_sync_fs,
+	//.write_inode = pnl_write_inode,
 };
 
 int pnl_fill_super(struct super_block *sb, void *data, int silent)
